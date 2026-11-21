@@ -1,0 +1,2421 @@
+// 重构前的单文件源码归档，仅供对照，不参与项目编译。
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Component;
+import java.awt.Dimension;
+import java.awt.FlowLayout;
+import java.awt.Font;
+import java.awt.FontMetrics;
+import java.awt.Graphics2D;
+import java.awt.GridLayout;
+import java.awt.Image;
+import java.awt.Insets;
+import java.awt.Point;
+import java.awt.RenderingHints;
+import java.awt.event.ActionEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.awt.image.BufferedImage;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Random;
+
+import javax.swing.BorderFactory;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.ImageIcon;
+import javax.swing.JButton;
+import javax.swing.JDialog;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JMenu;
+import javax.swing.JMenuBar;
+import javax.swing.JMenuItem;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTabbedPane;
+import javax.swing.JTextArea;
+import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
+import javax.swing.Timer;
+import javax.swing.UIManager;
+import javax.swing.UnsupportedLookAndFeelException;
+
+/**
+ * MinesweeperProEnhancedFinal.java
+ * 
+ * 扫雷 Pro 增强版 - 包含完整修改和优化
+ * 
+ * 主要优化：
+ * 1. 鼠标监听效率优化，避免点击无响应
+ * 2. 修复边缘格子洪水填充问题
+ * 3. 困难模式生命值扣除翻倍
+ * 4. 国王雷区特殊处理（蓝色边框，始终可点击）
+ * 
+ * @author 游戏开发大作业
+ * @version 5.1
+ */
+public class MinesweeperProEnhancedFinal extends JFrame {
+
+    // ========== 参数配置 ==========
+    static final int SIZE = 20;                       // 棋盘边长（20x20）
+    static final int CELL_PIX = 30;                   // 每格像素（UI 用）
+    static final int KING_ZONE_SIZE = 5;              // 国王区大小（右下 5x5）
+    static final int TOPLEFT_INIT_OPEN = 5;           // 左上初始已揭开区域大小（5x5）
+    static final int INFORMER_ZONE_SIZE = 7;          // 内鬼区大小
+    static final int INFORMER_ZONE_MINES = 10;        // 每个内鬼区固定地雷数（含内鬼本体）
+    static final double NORMAL_GROWTH_RATE = 0.20;    // 普通雷每回合增殖率（20%）
+    static final Color[] NUMBER_COLORS = {            // 数字颜色配置
+        new Color(0, 0, 255),     // 1 - 蓝色
+        new Color(0, 128, 0),     // 2 - 绿色
+        new Color(255, 0, 0),     // 3 - 红色
+        new Color(128, 0, 128),   // 4 - 紫色
+        new Color(128, 0, 0),     // 5 - 深红
+        new Color(0, 128, 128),   // 6 - 青色
+        new Color(0, 0, 0),       // 7 - 黑色
+        new Color(128, 128, 128)  // 8 - 灰色
+    };
+    
+    // 动画帧数
+    static final int EXPLOSION_FRAMES = 8;
+    static final int EXPLOSION_DELAY = 30; // 每帧延迟(ms)
+    
+    // 难度配置
+    enum Difficulty {
+        EASY("简单", 60, 8, 1.0, 1),
+        NORMAL("普通", 80, 5, 1.2, 1),
+        HARD("困难", 100, 3, 1.5, 2); // 困难模式扣血倍数2
+        
+        String name;
+        int initialMines;
+        int initialHP;
+        double growthMultiplier;
+        int hpPenaltyMultiplier; // 生命值扣除倍数
+        
+        Difficulty(String name, int mines, int hp, double multiplier, int penalty) {
+            this.name = name;
+            this.initialMines = mines;
+            this.initialHP = hp;
+            this.growthMultiplier = multiplier;
+            this.hpPenaltyMultiplier = penalty;
+        }
+    }
+    
+    // 成就枚举
+    enum Achievement {
+        FIRST_WIN("首次胜利", "赢得第一场游戏"),
+        PERFECT_WIN("完美胜利", "在不标记错误的情况下获胜"),
+        QUICK_WIN("快速胜利", "在5回合内获胜"),
+        MASTER_SWEEPER("扫雷大师", "清除100颗地雷"),
+        KING_HUNTER("国王猎手", "直接找到国王雷获胜"),
+        INFORMER_MASTER("内鬼大师", "在同一回合捕获两个内鬼"),
+        SURVIVOR("幸存者", "以1点HP获胜"),
+        CHAIN_REACTION("连锁反应", "一次引爆5颗以上地雷");
+        
+        String name;
+        String description;
+        
+        Achievement(String name, String description) {
+            this.name = name;
+            this.description = description;
+        }
+    }
+    
+    // 游戏参数（根据难度调整）
+    Difficulty currentDifficulty = Difficulty.NORMAL;
+    int INITIAL_NORMAL_MINES;
+    int INITIAL_HP;
+    double GROWTH_RATE_MULTIPLIER;
+    int HP_PENALTY_MULTIPLIER;
+    // ================================
+
+    // ======= 数据结构 =======
+    class Cell {
+        boolean isNormalMine = false;   // 普通雷（不含内鬼区中固定的那些）
+        boolean isKing = false;         // 是否为国王雷
+        boolean isInformerCore = false; // 是否为内鬼核心（内鬼雷）
+        int informerId = -1;            // 属于哪个内鬼区（0/1），-1 表示不在内鬼区
+        boolean revealed = false;       // 是否已揭开
+        boolean flagged = false;        // 是否由玩家右键标记（旗）
+        int number = 0;                 // 周围地雷数（UI 显示）
+    }
+
+    Cell[][] board = new Cell[SIZE][SIZE];
+    JButton[][] buttons = new JButton[SIZE][SIZE];
+
+    // 内鬼区域及其雷集合
+    Point[] informerZoneTL = new Point[2];   // 每个内鬼区的左上角
+    boolean[] informerActive = new boolean[]{true, true}; // 区域是否还有效（被捕获后失效）
+    HashSet<Point>[] informerMines = new HashSet[2];     // 每个内鬼区当前存在的雷位置集合（初始 10 个）
+    Point[] informerCore = new Point[2];    // 内鬼核心位置（不可移动）
+
+    // 国王位置（每回合 Phase B 后随机在右下 5x5）
+    int kingRow = -1, kingCol = -1;
+
+    // 游戏状态
+    int hp;
+    int normalMineCount;
+    boolean phaseA = true; // true 表示当前处于 Phase A（玩家操作）
+    int revealedCount = 0;
+    int currentTurn = 1;
+    boolean gameEnded = false;
+    
+    // 游戏历史记录
+    ArrayList<String> gameHistory = new ArrayList<>();
+    ArrayList<int[][]> boardHistory = new ArrayList<>();
+    
+    // 成就系统
+    HashMap<Achievement, Boolean> achievements = new HashMap<>();
+    int totalMinesCleared = 0;
+    int consecutiveCorrectFlags = 0;
+
+    Random rand = new Random();
+
+    // UI 组件
+    JLabel hpLabel, phaseLabel, revealedLabel, turnLabel, difficultyLabel;
+    JLabel normalMinesLabel;
+    JLabel informerLineX, informerLineY; // 用于显示内鬼提供的国王坐标（当对应内鬼被捕获后显示）
+    JButton endPhaseButton;
+    JLabel legendLabel;
+    
+    // 菜单组件
+    JMenuBar menuBar;
+    JMenu gameMenu, helpMenu, viewMenu;
+    JMenuItem newGameItem, exitItem, difficultyItem;
+    JMenuItem tutorialItem, rulesItem, aboutItem;
+    JMenuItem historyItem, statsItem, achievementsItem;
+    
+    // 教程窗口
+    JDialog tutorialDialog;
+    
+    // 统计信息
+    int totalMoves = 0;
+    int correctFlags = 0;
+    int wrongFlags = 0;
+    int minesCleared = 0;
+    long startTime;
+    
+    // 图片资源
+    ImageIcon mineIcon;
+    ImageIcon kingMineIcon;
+    ImageIcon informerMineIcon;
+    
+    // 动画相关
+    Timer explosionTimer;
+    int explosionFrame = 0;
+    List<Point> explosionPoints = new ArrayList<>();
+    
+    // 点击处理锁定（防止重复点击）
+    private volatile boolean isProcessingClick = false;
+    
+    // ========== 构造和初始化 ==========
+    public MinesweeperProEnhancedFinal() {
+        super("扫雷 Pro 增强版（优化版 v5.1）");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        
+        // 加载图片资源
+        loadIcons();
+        
+        // 显示难度选择对话框
+        showDifficultySelection();
+        
+        // 初始化成就系统
+        initAchievements();
+        
+        // 初始化游戏历史
+        startTime = System.currentTimeMillis();
+        gameHistory.add("游戏开始 - 时间: " + new Date());
+        gameHistory.add("难度: " + currentDifficulty.name);
+        
+        // 根据难度设置参数
+        INITIAL_NORMAL_MINES = currentDifficulty.initialMines;
+        INITIAL_HP = currentDifficulty.initialHP;
+        GROWTH_RATE_MULTIPLIER = currentDifficulty.growthMultiplier;
+        HP_PENALTY_MULTIPLIER = currentDifficulty.hpPenaltyMultiplier;
+        
+        // 初始化数据
+        hp = INITIAL_HP;
+        normalMineCount = INITIAL_NORMAL_MINES;
+
+        initBoard();
+        placeInformerZones();
+        placeInformerMines();
+        placeKingRandom();
+        placeNormalMinesInitial();
+        computeAllNumbers();
+        openInitialTopLeft();
+        
+        // 保存初始状态
+        saveBoardState();
+
+        buildGUI();
+        createTutorialSystem();
+        createMenuSystem();
+
+        refreshAllButtons();
+        updateInfoLabels();
+
+        pack();
+        setResizable(true);
+        setLocationRelativeTo(null);
+        setExtendedState(JFrame.MAXIMIZED_BOTH);
+    }
+    
+    /**
+     * 加载图标资源
+     */
+    private void loadIcons() {
+        try {
+            // 创建简单的图标（如果没有图片文件，使用颜色方块）
+            mineIcon = createColorIcon(Color.RED, "雷");
+            kingMineIcon = createColorIcon(Color.YELLOW, "王");
+            informerMineIcon = createColorIcon(Color.MAGENTA, "内");
+        } catch (Exception e) {
+            // 如果加载失败，使用默认颜色方块
+            mineIcon = createColorIcon(Color.RED, "雷");
+            kingMineIcon = createColorIcon(Color.YELLOW, "王");
+            informerMineIcon = createColorIcon(Color.MAGENTA, "内");
+        }
+    }
+    
+    /**
+     * 创建颜色图标
+     */
+    private ImageIcon createColorIcon(Color color, String text) {
+        int size = CELL_PIX - 6; // 稍微小于单元格
+        BufferedImage image = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g2d = image.createGraphics();
+        
+        // 设置抗锯齿
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        
+        // 绘制背景
+        g2d.setColor(color);
+        g2d.fillOval(2, 2, size-4, size-4);
+        
+        // 绘制边框
+        g2d.setColor(color.darker());
+        g2d.drawOval(2, 2, size-4, size-4);
+        
+        // 绘制文字
+        if (text != null && !text.isEmpty()) {
+            g2d.setColor(Color.BLACK);
+            g2d.setFont(new Font("微软雅黑", Font.BOLD, 12));
+            FontMetrics fm = g2d.getFontMetrics();
+            int textWidth = fm.stringWidth(text);
+            int textHeight = fm.getHeight();
+            g2d.drawString(text, (size - textWidth) / 2, (size + textHeight) / 2 - 4);
+        }
+        
+        g2d.dispose();
+        return new ImageIcon(image);
+    }
+    
+    /**
+     * 显示难度选择对话框
+     */
+    private void showDifficultySelection() {
+        String[] options = {"简单", "普通", "困难"};
+        int choice = JOptionPane.showOptionDialog(null, """
+                                                        请选择游戏难度：
+                                                        
+                                                        简单：初始地雷较少，生命值较高
+                                                        普通：标准难度，平衡的游戏体验
+                                                        困难：初始地雷较多，生命值较低，地雷增殖更快，扣血翻倍""",
+            "选择难度",
+            JOptionPane.DEFAULT_OPTION,
+            JOptionPane.QUESTION_MESSAGE,
+            null,
+            options,
+            options[1]  // 默认选择普通
+        );
+        
+        currentDifficulty = switch (choice) {
+            case 0 -> Difficulty.EASY;
+            case 1 -> Difficulty.NORMAL;
+            case 2 -> Difficulty.HARD;
+            default -> Difficulty.NORMAL;
+        };
+    }
+    
+    /**
+     * 初始化成就系统
+     */
+    private void initAchievements() {
+        for (Achievement ach : Achievement.values()) {
+            achievements.put(ach, false);
+        }
+    }
+    
+    /**
+     * 检查并解锁成就
+     */
+    private void checkAchievements(boolean isWin) {
+        // 首次胜利
+        if (isWin && !achievements.get(Achievement.FIRST_WIN)) {
+            unlockAchievement(Achievement.FIRST_WIN);
+        }
+        
+        // 完美胜利（没有错误标记）
+        if (isWin && wrongFlags == 0 && !achievements.get(Achievement.PERFECT_WIN)) {
+            unlockAchievement(Achievement.PERFECT_WIN);
+        }
+        
+        // 快速胜利（5回合内）
+        if (isWin && currentTurn <= 5 && !achievements.get(Achievement.QUICK_WIN)) {
+            unlockAchievement(Achievement.QUICK_WIN);
+        }
+        
+        // 扫雷大师（清除100颗地雷）
+        if (totalMinesCleared >= 100 && !achievements.get(Achievement.MASTER_SWEEPER)) {
+            unlockAchievement(Achievement.MASTER_SWEEPER);
+        }
+        
+        // 国王猎手（直接找到国王雷）
+        // 这个成就在游戏胜利时检查具体胜利方式
+        
+        // 幸存者（以1点HP获胜）
+        if (isWin && hp == 1 && !achievements.get(Achievement.SURVIVOR)) {
+            unlockAchievement(Achievement.SURVIVOR);
+        }
+    }
+    
+    /**
+     * 解锁成就
+     */
+    private void unlockAchievement(Achievement achievement) {
+        if (!achievements.get(achievement)) {
+            achievements.put(achievement, true);
+            
+            // 显示成就解锁通知
+            SwingUtilities.invokeLater(() -> {
+                JOptionPane.showMessageDialog(
+                    this,
+                    """
+                    🎉 成就解锁！
+                    
+                    成就: """ + achievement.name + "\n" +
+                    "描述: " + achievement.description,
+                    "成就解锁",
+                    JOptionPane.INFORMATION_MESSAGE
+                );
+            });
+            
+            gameHistory.add("成就解锁: " + achievement.name);
+        }
+    }
+    
+    /**
+     * 检查内鬼大师成就（同一回合捕获两个内鬼）
+     */
+    private void checkInformerMasterAchievement() {
+        if (!informerActive[0] && !informerActive[1]) {
+            // 检查是否在同一回合捕获的
+            // 这里简化处理：如果两个内鬼都失效了，就算解锁
+            if (!achievements.get(Achievement.INFORMER_MASTER)) {
+                unlockAchievement(Achievement.INFORMER_MASTER);
+            }
+        }
+    }
+
+    // ========== 游戏核心逻辑 ==========
+    
+    /**
+     * 初始化游戏棋盘
+     */
+    private void initBoard() {
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                board[r][c] = new Cell();
+            }
+        }
+        gameHistory.add("棋盘初始化完成 - 大小: " + SIZE + "x" + SIZE);
+    }
+
+    /**
+     * 放置两个内鬼区（满足约束：不在左上 10x10，不在国王区，互不相邻/重叠）
+     */
+    private void placeInformerZones() {
+        int kingTL = SIZE - KING_ZONE_SIZE; // 15
+        List<Point> candidates = new ArrayList<>();
+        
+        // 生成所有可能的左上角位置
+        for (int r = 0; r <= SIZE - INFORMER_ZONE_SIZE; r++) {
+            for (int c = 0; c <= SIZE - INFORMER_ZONE_SIZE; c++) {
+                // 不在左上 10x10
+                if (r < 10 && c < 10) continue;
+                // 不与国王区重叠（即若与国王区有任何交集则排除）
+                if (!(r + INFORMER_ZONE_SIZE - 1 < kingTL || c + INFORMER_ZONE_SIZE - 1 < kingTL)) continue;
+                candidates.add(new Point(r, c));
+            }
+        }
+        
+        if (candidates.size() < 2) {
+            gameHistory.add("警告: 内鬼区候选位置太少，使用备用位置");
+            // 使用备用位置
+            informerZoneTL[0] = new Point(0, 10);
+            informerZoneTL[1] = new Point(10, 0);
+            return;
+        }
+        
+        // 随机取第一个
+        Point a = candidates.get(rand.nextInt(candidates.size()));
+        // 过滤掉与 a 相邻或重叠的候选
+        List<Point> c2 = new ArrayList<>();
+        for (Point p : candidates) {
+            if (zonesOverlapOrAdjacent(a, p)) continue;
+            c2.add(p);
+        }
+        
+        if (c2.isEmpty()) {
+            // 退化策略：顺序扫描寻找两个不重叠/不相邻的
+            boolean found = false;
+            outer:
+            for (Point p : candidates) {
+                for (Point q : candidates) {
+                    if (p.equals(q)) continue;
+                    if (!zonesOverlapOrAdjacent(p, q)) { 
+                        informerZoneTL[0] = p; 
+                        informerZoneTL[1] = q; 
+                        found = true; 
+                        break outer; 
+                    }
+                }
+            }
+            if (!found) {
+                gameHistory.add("错误: 无法放置两个内鬼区，使用默认位置");
+                informerZoneTL[0] = new Point(0, 10);
+                informerZoneTL[1] = new Point(10, 0);
+            }
+        } else {
+            informerZoneTL[0] = a;
+            informerZoneTL[1] = c2.get(rand.nextInt(c2.size()));
+        }
+        
+        gameHistory.add("内鬼区1位置: (" + informerZoneTL[0].x + "," + informerZoneTL[0].y + ")");
+        gameHistory.add("内鬼区2位置: (" + informerZoneTL[1].x + "," + informerZoneTL[1].y + ")");
+    }
+
+    /**
+     * 判断两个 5x5 区域是否重叠或相邻（接触边/角也视为相邻）
+     */
+    private boolean zonesOverlapOrAdjacent(Point a, Point b) {
+        int aR0 = a.x, aC0 = a.y, aR1 = aR0 + INFORMER_ZONE_SIZE - 1, aC1 = aC0 + INFORMER_ZONE_SIZE - 1;
+        int bR0 = b.x, bC0 = b.y, bR1 = bR0 + INFORMER_ZONE_SIZE - 1, bC1 = bC0 + INFORMER_ZONE_SIZE - 1;
+        return !(aR1 + 1 < bR0 || bR1 + 1 < aR0 || aC1 + 1 < bC0 || bC1 + 1 < aC0);
+    }
+
+    /**
+     * 在每个内鬼区内放入 10 个雷，包括 1 个内鬼核心（固定在最中间）
+     */
+    private void placeInformerMines() {
+        for (int id = 0; id < 2; id++) {
+            informerMines[id] = new HashSet<>();
+            Point tl = informerZoneTL[id];
+            
+            // 内鬼核心固定在内鬼区最中间 (2,2) 位置
+            int centerOffset = INFORMER_ZONE_SIZE / 2; // 5/2 = 2
+            int rr = tl.x + centerOffset;
+            int cc = tl.y + centerOffset;
+            informerCore[id] = new Point(rr, cc);
+            informerMines[id].add(new Point(rr, cc));
+            board[rr][cc].isInformerCore = true;
+            board[rr][cc].informerId = id;
+            
+            // 放置另外 9 颗（在该 5x5 中随机选，但不能是中心位置）
+            while (informerMines[id].size() < INFORMER_ZONE_MINES + 5) {
+                int r = tl.x + rand.nextInt(INFORMER_ZONE_SIZE);
+                int c = tl.y + rand.nextInt(INFORMER_ZONE_SIZE);
+                // 跳过中心位置（已经放了内鬼核心）
+                if (r == rr && c == cc) continue;
+                Point p = new Point(r, c);
+                if (informerMines[id].contains(p)) continue;
+                informerMines[id].add(p);
+                board[r][c].isNormalMine = true; // 作为区内固定雷
+                board[r][c].informerId = id;
+            }
+        }
+        gameHistory.add("内鬼区地雷放置完成 - 每个区10颗雷，内鬼核心在中心");
+    }
+
+    /**
+     * 随机把国王雷放在右下 5x5（可放在已揭开或未揭开格，之后 Phase B 会每回合重置）
+     */
+    private void placeKingRandom() {
+        if (kingRow != -1) board[kingRow][kingCol].isKing = false;
+        int start = SIZE - KING_ZONE_SIZE;
+        List<Point> cand = new ArrayList<>();
+        for (int r = start; r < SIZE; r++) {
+            for (int c = start; c < SIZE; c++) {
+                if (board[r][c].informerId == -1) cand.add(new Point(r,c));
+            }
+        }
+        
+        if (cand.isEmpty()) {
+            // 极端情况，直接在 king 区任意放一个
+            kingRow = start; 
+            kingCol = start;
+            board[kingRow][kingCol].isKing = true;
+            gameHistory.add("国王雷放置警告: 使用默认位置 (" + kingRow + "," + kingCol + ")");
+            return;
+        }
+        
+        Point p = cand.get(rand.nextInt(cand.size()));
+        kingRow = p.x; 
+        kingCol = p.y;
+        board[kingRow][kingCol].isKing = true;
+        gameHistory.add("国王雷位置: (" + kingRow + "," + kingCol + ")");
+    }
+
+    /**
+     * 初始在符合规则的位置放置普通雷（不包括内鬼区、左上初始区）
+     */
+    private void placeNormalMinesInitial() {
+        // 清除非内鬼区现有的普通标记（安全）
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                if (board[r][c].informerId == -1) board[r][c].isNormalMine = false;
+            }
+        }
+        
+        List<Point> avail = new ArrayList<>();
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                if (r < TOPLEFT_INIT_OPEN && c < TOPLEFT_INIT_OPEN) continue; // 左上初始区不放
+                if (board[r][c].informerId != -1) continue; // 内鬼区不放
+                avail.add(new Point(r,c));
+            }
+        }
+        
+        Collections.shuffle(avail, rand);
+        int place = Math.min(normalMineCount, avail.size());
+        for (int i = 0; i < place; i++) {
+            Point p = avail.get(i);
+            board[p.x][p.y].isNormalMine = true;
+        }
+        
+        // 保证国王标识正确（如果放置覆盖）
+        board[kingRow][kingCol].isKing = true;
+        gameHistory.add("普通雷放置完成 - 数量: " + place);
+    }
+
+    /**
+     * 计算所有格的数字
+     */
+    private void computeAllNumbers() {
+    for (int r = 0; r < SIZE; r++) {
+        for (int c = 0; c < SIZE; c++) {
+            board[r][c].number = computeNumberAround(r, c);
+            
+            // 确保内鬼区（活跃状态）没有数字0
+            for (int id = 0; id < 2; id++) {
+                if (informerActive[id] && 
+                    r >= informerZoneTL[id].x && r < informerZoneTL[id].x + INFORMER_ZONE_SIZE &&
+                    c >= informerZoneTL[id].y && c < informerZoneTL[id].y + INFORMER_ZONE_SIZE) {
+                    
+                    // 如果不是地雷，确保数字至少为1
+                    if (!board[r][c].isKing && 
+                        !(board[r][c].informerId != -1 && informerMines[board[r][c].informerId].contains(new Point(r,c))) &&
+                        !board[r][c].isNormalMine) {
+                        
+                        if (board[r][c].number == 0) {
+                            board[r][c].number = 1;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+    /**
+     * 计算指定格子周围的地雷数量
+     */
+    private int computeNumberAround(int r, int c) {
+        int cnt = 0;
+        for (int dr = -1; dr <= 1; dr++) {
+            for (int dc = -1; dc <= 1; dc++) {
+                if (dr == 0 && dc == 0) continue;
+                int rr = r + dr, cc = c + dc;
+                if (!inBounds(rr, cc)) continue;
+                if (board[rr][cc].isKing) cnt++;
+                else if (board[rr][cc].isInformerCore) cnt++;
+                else if (board[rr][cc].informerId != -1) {
+                    // 区内固定雷：判断 informerMines 集合中是否包含
+                    if (informerMines[board[rr][cc].informerId].contains(new Point(rr,cc))) cnt++;
+                } else if (board[rr][cc].isNormalMine) cnt++;
+            }
+        }
+        return cnt;
+    }
+
+    /**
+     * 打开左上初始 5x5
+     */
+    private void openInitialTopLeft() {
+        for (int r = 0; r < TOPLEFT_INIT_OPEN; r++) {
+            for (int c = 0; c < TOPLEFT_INIT_OPEN; c++) {
+                revealCell(r,c);
+            }
+        }
+        gameHistory.add("初始区域已揭开 - 大小: " + TOPLEFT_INIT_OPEN + "x" + TOPLEFT_INIT_OPEN);
+    }
+
+    // ========== GUI 构建 ==========
+    private void buildGUI() {
+        JPanel main = new JPanel(new BorderLayout());
+        JPanel gridPanel = new JPanel(new GridLayout(SIZE, SIZE));
+        gridPanel.setPreferredSize(new Dimension(CELL_PIX * SIZE, CELL_PIX * SIZE));
+        gridPanel.setBorder(BorderFactory.createLineBorder(Color.DARK_GRAY, 2));
+
+        Font btnFont = new Font("微软雅黑", Font.BOLD, 12);
+
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                JButton btn = new JButton();
+                btn.setFont(btnFont);
+                btn.setMargin(new Insets(0,0,0,0));
+                btn.setFocusPainted(false);
+                
+                final int rr = r, cc = c;
+                btn.addMouseListener(new MouseAdapter() {
+                    @Override
+                    public void mouseClicked(MouseEvent e) {
+                        // 异步处理点击，避免UI阻塞
+                        SwingUtilities.invokeLater(() -> {
+                            if (!phaseA || gameEnded || isProcessingClick) return;
+                            
+                            isProcessingClick = true;
+                            try {
+                                if (SwingUtilities.isLeftMouseButton(e)) {
+                                    onLeftClick(rr, cc);
+                                } else if (SwingUtilities.isRightMouseButton(e)) {
+                                    onRightClick(rr, cc);
+                                }
+                            } finally {
+                                isProcessingClick = false;
+                            }
+                        });
+                    }
+                    
+                    @Override
+                    public void mouseEntered(MouseEvent e) {
+                        if (!gameEnded && !board[rr][cc].revealed && !board[rr][cc].flagged) {
+                            btn.setBackground(new Color(240, 240, 240));
+                        }
+                    }
+                    
+                    @Override
+                    public void mouseExited(MouseEvent e) {
+                        if (!gameEnded && !board[rr][cc].revealed && !board[rr][cc].flagged) {
+                            btn.setBackground(UIManager.getColor("Button.background"));
+                        }
+                    }
+                });
+                
+                buttons[r][c] = btn;
+                gridPanel.add(btn);
+            }
+        }
+
+        // 右侧信息栏
+        JPanel side = new JPanel();
+        side.setLayout(new BoxLayout(side, BoxLayout.Y_AXIS));
+        side.setBorder(BorderFactory.createEmptyBorder(10,10,10,10));
+        side.setBackground(new Color(245, 245, 245));
+
+        hpLabel = new JLabel();
+        phaseLabel = new JLabel();
+        revealedLabel = new JLabel();
+        turnLabel = new JLabel();
+        difficultyLabel = new JLabel();
+        normalMinesLabel = new JLabel();
+        informerLineX = new JLabel(); // 第一个内鬼提供国王列 X
+        informerLineY = new JLabel(); // 第二个内鬼提供国王行 Y
+        endPhaseButton = new JButton("结束 Phase A（回合结束）");
+        legendLabel = new JLabel("<html><div style='width:200px'><b>游戏说明:</b><br>" +
+                "• 黄色 = 国王区<br>" +
+                "• 紫色 = 内鬼区<br>" +
+                "• 蓝色边框 = 国王区（始终可点击）</div></html>");
+
+        endPhaseButton.addActionListener(e -> {
+            if (!phaseA || gameEnded) return;
+            endPhaseA();
+        });
+        
+        // 设置字体和颜色
+        Font infoFont = new Font("微软雅黑", Font.PLAIN, 14);
+        Font titleFont = new Font("微软雅黑", Font.BOLD, 16);
+        
+        JLabel titleLabel = new JLabel("扫雷 Pro 增强版 v5.1");
+        titleLabel.setFont(titleFont);
+        titleLabel.setForeground(new Color(0, 102, 204));
+        
+        side.add(titleLabel);
+        side.add(Box.createVerticalStrut(15));
+        side.add(hpLabel);
+        side.add(Box.createVerticalStrut(8));
+        side.add(phaseLabel);
+        side.add(Box.createVerticalStrut(8));
+        side.add(revealedLabel);
+        side.add(Box.createVerticalStrut(8));
+        side.add(normalMinesLabel);
+        side.add(Box.createVerticalStrut(8));
+        side.add(turnLabel);
+        side.add(Box.createVerticalStrut(8));
+        side.add(difficultyLabel);
+        side.add(Box.createVerticalStrut(15));
+        
+        JPanel infoPanel = new JPanel();
+        infoPanel.setLayout(new BoxLayout(infoPanel, BoxLayout.Y_AXIS));
+        infoPanel.setBorder(BorderFactory.createTitledBorder("内鬼情报"));
+        infoPanel.add(informerLineX);
+        infoPanel.add(informerLineY);
+        side.add(infoPanel);
+        
+        side.add(Box.createVerticalStrut(15));
+        side.add(endPhaseButton);
+        side.add(Box.createVerticalStrut(15));
+        side.add(legendLabel);
+        
+        // 设置组件字体
+        Component[] comps = side.getComponents();
+        for (Component comp : comps) {
+            switch (comp) {
+                case JLabel jLabel -> jLabel.setFont(infoFont);
+                case JButton jButton -> jButton.setFont(infoFont);
+                default -> {
+                }
+            }
+        }
+        
+        informerLineX.setFont(infoFont);
+        informerLineY.setFont(infoFont);
+        legendLabel.setFont(new Font("微软雅黑", Font.PLAIN, 12));
+
+        main.add(gridPanel, BorderLayout.CENTER);
+        main.add(side, BorderLayout.EAST);
+        getContentPane().add(main);
+    }
+
+    /**
+     * 创建菜单系统
+     */
+    private void createMenuSystem() {
+        menuBar = new JMenuBar();
+        
+        // 游戏菜单
+        gameMenu = new JMenu("游戏");
+        newGameItem = new JMenuItem("新游戏");
+        difficultyItem = new JMenuItem("更改难度");
+        exitItem = new JMenuItem("退出");
+        
+        newGameItem.addActionListener(e -> newGame());
+        difficultyItem.addActionListener(e -> changeDifficulty());
+        exitItem.addActionListener(e -> System.exit(0));
+        
+        gameMenu.add(newGameItem);
+        gameMenu.add(difficultyItem);
+        gameMenu.addSeparator();
+        gameMenu.add(exitItem);
+        
+        // 视图菜单
+        viewMenu = new JMenu("视图");
+        historyItem = new JMenuItem("游戏历史");
+        statsItem = new JMenuItem("游戏统计");
+        achievementsItem = new JMenuItem("成就系统");
+        
+        historyItem.addActionListener(e -> showGameHistory());
+        statsItem.addActionListener(e -> showGameStatistics());
+        achievementsItem.addActionListener(e -> showAchievements());
+        
+        viewMenu.add(historyItem);
+        viewMenu.add(statsItem);
+        viewMenu.add(achievementsItem);
+        
+        // 帮助菜单
+        helpMenu = new JMenu("帮助");
+        tutorialItem = new JMenuItem("游戏教程");
+        rulesItem = new JMenuItem("游戏规则");
+        aboutItem = new JMenuItem("关于游戏");
+        
+        tutorialItem.addActionListener(e -> showTutorial());
+        rulesItem.addActionListener(e -> showRules());
+        aboutItem.addActionListener(e -> showAbout());
+        
+        helpMenu.add(tutorialItem);
+        helpMenu.add(rulesItem);
+        helpMenu.addSeparator();
+        helpMenu.add(aboutItem);
+        
+        menuBar.add(gameMenu);
+        menuBar.add(viewMenu);
+        menuBar.add(helpMenu);
+        
+        setJMenuBar(menuBar);
+    }
+
+    /**
+     * 创建教程系统
+     */
+    private void createTutorialSystem() {
+        tutorialDialog = new JDialog(this, "扫雷 Pro 教程", false);
+        tutorialDialog.setSize(800, 600);
+        tutorialDialog.setLocationRelativeTo(this);
+        
+        JTabbedPane tabbedPane = new JTabbedPane();
+        
+        // 基本规则标签页
+        JPanel basicPanel = new JPanel();
+        basicPanel.setLayout(new BorderLayout());
+        JTextArea basicText = new JTextArea();
+        basicText.setEditable(false);
+        basicText.setFont(new Font("微软雅黑", Font.PLAIN, 14));
+        basicText.setText("""
+            ==================== 扫雷 Pro 游戏规则 ====================
+
+            游戏概述
+            游戏目标：在动态变化的棋盘中找到并成功处理'国王雷'，从而获得胜利。
+            胜利条件：左键揭开国王雷或右键标记国王雷，国王雷仅一个，在右下角5*5区域，每回合刷新位置
+            失败条件：HP降至0或控制区（已揭开格数量）小于20（开局左上角为控制区）。
+            整个游戏每回合依次经历Phase A和Phase B。
+            Phase A：玩家操作阶段，玩家可点击已展开区域的相邻地块,左键展开，右键标雷，点到地雷连锁爆炸，错误行动进入PhaseB
+            Phase B：环境阶段，与未展开地区相邻的地块变为未展开，地雷在未展开区域刷新，数量增加
+            特殊规则：
+            场地内存在两个特殊地雷（内鬼雷），特殊地雷周围7*7地块的数字不准确（不会为空白，数字随机加减）
+            成功找出内鬼雷会获得持续更新的国王雷坐标
+            地雷爆炸，血量-1，周围3*3发生连锁爆炸
+            注意：由于刷新限制，请勿过快点击，有概率点不上
+            """);
+        basicPanel.add(new JScrollPane(basicText), BorderLayout.CENTER);
+        tabbedPane.addTab("基本规则", basicPanel);
+        
+        // 地雷类型标签页
+        JPanel minesPanel = new JPanel();
+        minesPanel.setLayout(new BorderLayout());
+        JTextArea minesText = new JTextArea();
+        minesText.setEditable(false);
+        minesText.setFont(new Font("微软雅黑", Font.PLAIN, 14));
+        minesText.setText("""
+            ==================== 地雷类型与机制 ====================
+
+            1. 普通雷 (Normal):
+               • 左键踩中: 爆炸并 HP -1
+               • 右键标记正确: HP +1
+               • 每回合增殖 20%
+
+            2. 国王雷 (King):
+               • 只会出现在右下 5x5 区域
+               • 左键揭开或右键正确标记直接获胜
+               • 国王雷区（右下5x5）有蓝色边框，始终可点击
+
+            3. 内鬼雷 (Informer):
+               • 每局两个，位于固定内鬼区
+               • 内鬼区特点:
+                 - 5x5 固定区域
+                 - 区内固定 10 个雷（含内鬼本体）
+                 - 内鬼雷固定在内鬼区最中间
+                 - 整个内鬼区的数字会随机变化
+               • 捕获方式:
+                 - 左键踩到内鬼区内任意雷
+                 - 右键标记内鬼雷
+               • 情报系统:
+                 - 第一个内鬼提供国王列坐标 (X)
+                 - 第二个内鬼提供国王行坐标 (Y)
+            """);
+        minesPanel.add(new JScrollPane(minesText), BorderLayout.CENTER);
+        tabbedPane.addTab("地雷类型", minesPanel);
+        
+        // 操作指南标签页
+        JPanel guidePanel = new JPanel();
+        guidePanel.setLayout(new BorderLayout());
+        JTextArea guideText = new JTextArea();
+        guideText.setEditable(false);
+        guideText.setFont(new Font("微软雅黑", Font.PLAIN, 14));
+        guideText.setText("""
+            ==================== 操作指南 ====================
+
+            1. 左键点击:
+               • 点击空白格: 显示数字
+               • 点击数字格: 显示数字
+               • 点击地雷: 触发连锁爆炸，强制进入 Phase B
+
+            2. 右键标记:
+               • 标记正确（命中任意雷）:
+                 - HP +1，变为已揭开
+               • 标记错误（标在非雷格上）:
+                 - HP -1，保持未揭开
+                 - Phase A 立即结束
+
+            3. Phase B 自动流程:
+               • 国王雷重置位置
+               • 内鬼区刷新（整个内鬼区数字变化）
+               • 视野收缩（边缘已揭开格变回未揭开）
+               • 普通雷增殖 20%
+               • 控制区检查（已揭开格 < 20 则失败）
+
+            4. 连锁爆炸规则:
+               • 左键点击任意雷触发
+               • 爆炸以 3x3 方式向周围扩散
+               • 不会传播给国王雷
+               • 每炸一颗雷，HP -1
+               • 有动画效果展示爆炸过程
+
+            5. 特殊区域:
+               • 国王雷区（右下5x5，蓝色边框）: 始终可点击，无需相邻已揭开格
+               • 内鬼区（紫色区域）: 数字会随机变化
+            """);
+        guidePanel.add(new JScrollPane(guideText), BorderLayout.CENTER);
+        tabbedPane.addTab("操作指南", guidePanel);
+        
+        // 高级策略标签页
+        JPanel strategyPanel = new JPanel();
+        strategyPanel.setLayout(new BorderLayout());
+        JTextArea strategyText = new JTextArea();
+        strategyText.setEditable(false);
+        strategyText.setFont(new Font("微软雅黑", Font.PLAIN, 14));
+        strategyText.setText("""
+            ==================== 高级策略 ====================
+
+            1. 开局策略:
+               • 利用左上 5x5 安全区向外扩张
+               • 优先标记明显的地雷位置
+               • 注意保存 HP，避免不必要的风险
+
+            2. 内鬼处理策略:
+               • 优先捕获内鬼获取国王坐标
+               • 注意内鬼区数字变化，可能影响判断
+               • 内鬼雷固定在内鬼区中心，更容易定位
+               • 右键标记内鬼雷是最安全的方式
+
+            3. 国王寻找策略:
+               • 结合两个内鬼提供的情报定位国王
+               • 国王每回合移动，需要快速行动
+               • 考虑使用连锁爆炸清除障碍
+               • 国王雷区可直接点击，无需相邻格
+
+            4. 资源管理:
+               • 保持 HP 在安全范围（建议 > 3）
+               • 注意控制区大小（已揭开格 ≥ 20）
+               • 合理使用右键标记获取 HP
+
+            5. 风险控制:
+               • 避免在 HP 低时冒险
+               • 注意普通雷的增殖速度
+               • 规划好 Phase A 结束时机
+            """);
+        strategyPanel.add(new JScrollPane(strategyText), BorderLayout.CENTER);
+        tabbedPane.addTab("高级策略", strategyPanel);
+        
+        // 胜利条件标签页
+        JPanel victoryPanel = new JPanel();
+        victoryPanel.setLayout(new BorderLayout());
+        JTextArea victoryText = new JTextArea();
+        victoryText.setEditable(false);
+        victoryText.setFont(new Font("微软雅黑", Font.PLAIN, 14));
+        victoryText.setText("""
+            ==================== 胜负条件 ====================
+
+            1. 胜利条件（满足任意一条）:
+               • 左键揭开国王雷
+               • 右键标记国王雷
+
+            2. 失败条件（满足任意一条）:
+               • HP 降至 0
+               • 控制区（已揭开格数量）小于 20
+
+            3. 游戏提示:
+               • 游戏难度会随回合增加而提高
+               • 普通雷每回合增殖 20%
+               • 视野会不断收缩，需要持续扩张
+               • 内鬼情报是关键，优先获取
+
+            4. 特殊说明:
+               • 内鬼区被捕获后，该区域失效
+               • 连锁爆炸有动画效果展示
+               • 国王雷每回合在国王区随机移动
+               • 游戏提供实时坐标情报辅助决策
+            """);
+        victoryPanel.add(new JScrollPane(victoryText), BorderLayout.CENTER);
+        tabbedPane.addTab("胜负条件", victoryPanel);
+        
+        tutorialDialog.add(tabbedPane);
+    }
+
+    /**
+     * 刷新所有按钮显示与状态
+     */
+    private void refreshAllButtons() {
+        revealedCount = 0;
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                JButton btn = buttons[r][c];
+                Cell cell = board[r][c];
+                btn.setEnabled(true);
+                
+                // 重置边框
+                btn.setBorder(UIManager.getBorder("Button.border"));
+                
+                if (gameEnded) {
+                    btn.setEnabled(false);
+                }
+                
+                // 国王雷区特殊边框（蓝色边框）
+                boolean isKingZone = (r >= SIZE - KING_ZONE_SIZE && c >= SIZE - KING_ZONE_SIZE);
+                
+                if (cell.revealed) {
+                    // 已揭开的格子有黑色边框
+                    btn.setBorder(BorderFactory.createLineBorder(Color.BLACK, 2));
+                } else {
+                    // 未揭开的格子
+                    if (isKingZone) {
+                        // 国王雷区：蓝色边框，始终可点击
+                        btn.setBorder(BorderFactory.createLineBorder(Color.BLUE, 2));
+                    } else {
+                        // 普通区域：灰色边框
+                        btn.setBorder(BorderFactory.createLineBorder(Color.GRAY, 1));
+                    }
+                }
+                
+                // 设置背景色
+                if (cell.revealed) {
+                    revealedCount++;
+                    // 已点开的格子颜色加深
+                    btn.setBackground(new Color(200, 200, 200));
+                    
+                    // 特殊区域标识
+                    if (isKingZone) {
+                        // 国王区
+                        btn.setBackground(new Color(255, 255, 180)); // 浅黄色
+                    }
+                    
+                    for (int id = 0; id < 2; id++) {
+                        // 只有活跃的内鬼区才显示紫色
+                        if (informerActive[id] && 
+                            r >= informerZoneTL[id].x && r < informerZoneTL[id].x + INFORMER_ZONE_SIZE &&
+                            c >= informerZoneTL[id].y && c < informerZoneTL[id].y + INFORMER_ZONE_SIZE) {
+                            btn.setBackground(new Color(255, 200, 255)); // 浅紫色
+                        }
+                    }
+                    
+                    if (cell.isKing) {
+                        // 国王格 - 使用图标
+                        btn.setIcon(kingMineIcon);
+                        btn.setText("");
+                        btn.setBackground(new Color(255, 215, 0)); // 金色
+                    } else {
+                        // 清除图标
+                        btn.setIcon(null);
+                        
+                        if (cell.number > 0) {
+                            btn.setText(String.valueOf(cell.number));
+                            // 根据数字设置颜色
+                            if (cell.number <= NUMBER_COLORS.length) {
+                                btn.setForeground(NUMBER_COLORS[cell.number - 1]);
+                            } else {
+                                btn.setForeground(Color.BLACK);
+                            }
+                        } else {
+                            btn.setText("");
+                            btn.setForeground(Color.BLACK);
+                        }
+                    }
+                } else {
+                    // 未揭开
+                    btn.setBackground(UIManager.getColor("Button.background"));
+                    btn.setIcon(null); // 清除图标
+                    
+                    if (cell.flagged) {
+                        btn.setBackground(new Color(255, 200, 200)); // 浅红色
+                        btn.setForeground(Color.BLACK);
+                    } else {
+                        btn.setText("");
+                        btn.setForeground(Color.BLACK);
+                    }
+                }
+            }
+        }
+        updateInfoLabels();
+    }
+
+    /**
+     * 更新信息标签
+     */
+    private void updateInfoLabels() {
+        hpLabel.setText("<html><b>HP（生命值）:</b> " + hp + "</html>");
+        phaseLabel.setText("<html><b>当前阶段:</b> " + (phaseA ? "Phase A（玩家操作）" : "Phase B（环境）") + "</html>");
+        revealedLabel.setText("<html><b>已揭开格数:</b> " + revealedCount + " / " + (SIZE * SIZE) + "</html>");
+        normalMinesLabel.setText("<html><b>普通地雷数量:</b> " + normalMineCount + "</html>");
+        turnLabel.setText("<html><b>当前回合:</b> " + currentTurn + "</html>");
+        difficultyLabel.setText("<html><b>游戏难度:</b> " + currentDifficulty.name + 
+                                (currentDifficulty == Difficulty.HARD ? "（扣血翻倍）" : "") + "</html>");
+
+        // 只有当对应内鬼被捕获（informerActive[id] == false）时，才显示对应情报
+        if (!informerActive[0]) {
+            informerLineX.setText("<html><b>内鬼1情报:</b> 国王列 = " + kingCol + "</html>");
+        } else {
+            informerLineX.setText("<html><b>内鬼1:</b> 未捕获</html>");
+        }
+        if (!informerActive[1]) {
+            informerLineY.setText("<html><b>内鬼2情报:</b> 国王行 = " + kingRow + "</html>");
+        } else {
+            informerLineY.setText("<html><b>内鬼2:</b> 未捕获</html>");
+        }
+    }
+
+    // ========== 玩家操作：左键 / 右键 ==========
+    
+    /**
+     * 左键点击处理
+     */
+    private void onLeftClick(int r, int c) {
+        totalMoves++;
+        Cell cell = board[r][c];
+        if (cell.revealed) return;
+
+        // 检查点击合法性：国王雷区始终可点击，其他区域必须在已揭开格的8邻域内
+        boolean isKingZone = (r >= SIZE - KING_ZONE_SIZE && c >= SIZE - KING_ZONE_SIZE);
+        if (!isKingZone && !isValidClickPosition(r, c)) {
+            JOptionPane.showMessageDialog(this, "只能点击未知格，且必须位于已揭开格的八邻域内（沿已揭开区域拓展）。\n国王雷区（右下5x5蓝色边框）可以随时点击。");
+            return;
+        }
+
+        gameHistory.add("第" + currentTurn + "回合 - 左键点击: (" + r + "," + c + ")");
+
+        // 如果是国王（左键揭开国王） -> 直接胜利
+        if (cell.isKing) {
+            // 揭开并胜利
+            cell.revealed = true;
+            refreshAllButtons();
+            gameHistory.add("游戏胜利 - 左键揭开了国王雷！");
+            // 检查国王猎手成就
+            if (!achievements.get(Achievement.KING_HUNTER)) {
+                unlockAchievement(Achievement.KING_HUNTER);
+            }
+            showGameOverDialog(true, "左键揭开了国王雷！你胜利了！");
+            return;
+        }
+
+        // 如果点到内鬼区中的任意雷（包含内鬼核心或其它区内雷）
+        if (cell.informerId != -1 && informerActive[cell.informerId] && informerMines[cell.informerId].contains(new Point(r,c))) {
+            // 内鬼区被踩到：该内鬼区内所有雷立即爆炸，等量减少 HP，内鬼被捕获（区域失效）
+            int exploded = informerMines[cell.informerId].size();
+            hp -= getHpPenalty(exploded);
+            minesCleared += exploded;
+            totalMinesCleared += exploded;
+            
+            // 记录事件
+            gameHistory.add("踩到内鬼区地雷 - 引爆" + exploded + "颗雷，HP -" + getHpPenalty(exploded));
+            
+            // 开始爆炸动画
+            List<Point> explosionList = new ArrayList<>();
+            for (Point p : informerMines[cell.informerId]) {
+                explosionList.add(p);
+            }
+            startExplosionAnimation(explosionList, exploded, true);
+            return;
+        }
+
+        // 如果踩到普通雷（包括国王雷区的普通雷）
+        if (cell.isNormalMine) {
+            gameHistory.add("踩到普通雷 - 触发连锁爆炸");
+            
+            // 爆炸传播：以 3x3 传播一次（不传播给国王雷）
+            List<Point> explosionList = new ArrayList<>();
+            explosionList.add(new Point(r, c)); // 起始点
+            
+            int exploded = 1; // 包括起始点
+            for (int dr = -1; dr <= 1; dr++) {
+                for (int dc = -1; dc <= 1; dc++) {
+                    int rr = r + dr, cc = c + dc;
+                    if (!inBounds(rr, cc)) continue;
+                    // 国王不受传播影响
+                    if (board[rr][cc].isKing) continue;
+                    // 若是在内鬼区且该区有效，且该点在 informerMines 中，则该格也算爆炸
+                    if (board[rr][cc].informerId != -1) {
+                        int id = board[rr][cc].informerId;
+                        if (informerActive[id] && informerMines[id].contains(new Point(rr,cc))) {
+                            exploded++;
+                            explosionList.add(new Point(rr,cc));
+                        }
+                    } else if (board[rr][cc].isNormalMine) {
+                        exploded++;
+                        explosionList.add(new Point(rr,cc));
+                    }
+                }
+            }
+            
+            // 检查连锁反应成就
+            if (exploded >= 5 && !achievements.get(Achievement.CHAIN_REACTION)) {
+                unlockAchievement(Achievement.CHAIN_REACTION);
+            }
+            
+            // 开始爆炸动画
+            startExplosionAnimation(explosionList, exploded, false);
+            return;
+        }
+
+        // 正常空格/数字格 -> 揭开（若 number==0 做标准 flood fill）
+        revealCell(r,c);
+        refreshAllButtons();
+        
+        // 检查是否胜利（通过揭开所有非雷格）
+        checkWinCondition();
+    }
+
+    /**
+     * 开始爆炸动画
+     */
+    private void startExplosionAnimation(List<Point> explosionList, int exploded, boolean isInformerZone) {
+        explosionPoints = explosionList;
+        explosionFrame = 0;
+        
+        // 禁用所有按钮
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                buttons[r][c].setEnabled(false);
+            }
+        }
+        
+        // 创建定时器播放动画
+        explosionTimer = new Timer(EXPLOSION_DELAY, (ActionEvent e) -> {
+            if (explosionFrame < EXPLOSION_FRAMES) {
+                // 更新当前帧
+                updateExplosionFrame();
+                explosionFrame++;
+            } else {
+                // 动画结束
+                explosionTimer.stop();
+                
+                // 处理爆炸结果
+                processExplosionResult(explosionList, exploded, isInformerZone);
+            }
+        });
+        explosionTimer.start();
+    }
+    
+    /**
+     * 更新爆炸动画帧
+     */
+    private void updateExplosionFrame() {
+        float progress = (float) explosionFrame / EXPLOSION_FRAMES;
+        
+        for (Point p : explosionPoints) {
+            JButton btn = buttons[p.x][p.y];
+            
+            // 计算爆炸颜色（从黄色到红色）
+            int red = 255;
+            int green = (int) (255 * (1 - progress));
+            int blue = 0;
+            Color explosionColor = new Color(red, green, blue);
+            
+            // 创建爆炸图标
+            BufferedImage img = new BufferedImage(CELL_PIX - 6, CELL_PIX - 6, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D g2d = img.createGraphics();
+            g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            
+            // 绘制爆炸效果
+            g2d.setColor(explosionColor);
+            int size = (int) ((CELL_PIX - 6) * (0.5 + 0.5 * progress));
+            g2d.fillOval((CELL_PIX - 6 - size) / 2, (CELL_PIX - 6 - size) / 2, size, size);
+            
+            // 绘制爆炸中心
+            g2d.setColor(Color.WHITE);
+            int centerSize = size / 3;
+            g2d.fillOval((CELL_PIX - 6 - centerSize) / 2, (CELL_PIX - 6 - centerSize) / 2, centerSize, centerSize);
+            
+            g2d.dispose();
+            
+            btn.setIcon(new ImageIcon(img));
+            btn.setBackground(explosionColor.darker());
+        }
+    }
+    
+    /**
+     * 处理爆炸结果
+     */
+    private void processExplosionResult(List<Point> explosionList, int exploded, boolean isInformerZone) {
+        if (isInformerZone) {
+            // 内鬼区爆炸
+            for (Point p : explosionList) {
+                int id = board[p.x][p.y].informerId;
+                // 移除该区所有雷
+                for (Point mp : informerMines[id]) {
+                    board[mp.x][mp.y].isNormalMine = false;
+                    board[mp.x][mp.y].isInformerCore = false;
+                    board[mp.x][mp.y].informerId = -1;
+                }
+                informerMines[id].clear();
+                informerActive[id] = false; // 区域失效（被捕获）
+            }
+            
+            // 检查内鬼大师成就
+            checkInformerMasterAchievement();
+        } else {
+            // 普通连锁爆炸
+            for (Point p : explosionList) {
+                board[p.x][p.y].isNormalMine = false;
+                if (board[p.x][p.y].informerId != -1) {
+                    // 如果来自 informerMines，需要从集合中移除
+                    int id = board[p.x][p.y].informerId;
+                    informerMines[id].remove(new Point(p.x,p.y));
+                }
+                board[p.x][p.y].informerId = -1;
+                board[p.x][p.y].isInformerCore = false;
+            }
+        }
+        
+        minesCleared += exploded;
+        totalMinesCleared += exploded;
+        hp -= getHpPenalty(exploded);
+        normalMineCount -= exploded;
+        gameHistory.add("连锁爆炸 - 炸毁" + exploded + "颗地雷，HP -" + getHpPenalty(exploded));
+        
+        // 恢复按钮状态
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                buttons[r][c].setEnabled(true);
+                buttons[r][c].setIcon(null);
+            }
+        }
+        
+        // 进入 Phase B
+        enterPhaseB();
+    }
+
+    /**
+     * 右键标记处理
+     */
+    private void onRightClick(int r, int c) {
+        totalMoves++;
+        Cell cell = board[r][c];
+        if (cell.revealed) return;
+
+        // 检查点击合法性：国王雷区始终可点击，其他区域必须在已揭开格的8邻域内
+        boolean isKingZone = (r >= SIZE - KING_ZONE_SIZE && c >= SIZE - KING_ZONE_SIZE);
+        if (!isKingZone && !isValidClickPosition(r, c)) {
+            JOptionPane.showMessageDialog(this, "只能标记未知格，且必须位于已揭开格的八邻域内（沿已揭开区域拓展）。\n国王雷区（右下5x5蓝色边框）可以随时标记。");
+            return;
+        }
+
+        gameHistory.add("第" + currentTurn + "回合 - 右键点击: (" + r + "," + c + ")");
+
+        // toggle 标记
+        if (cell.flagged) {
+            cell.flagged = false;
+            refreshAllButtons();
+            return;
+        }
+
+        // 新标记
+        cell.flagged = true;
+
+        // 判断是否命中任意雷（国王/内鬼区内雷/普通雷）
+        boolean correct = false;
+        if (cell.isKing) correct = true;
+        else if (cell.informerId != -1 && informerActive[cell.informerId] && informerMines[cell.informerId].contains(new Point(r,c))) correct = true;
+        else if (cell.isNormalMine) correct = true;
+
+        if (correct) {
+            correctFlags++;
+            consecutiveCorrectFlags++;
+            // 标记正确：HP +1，变为已揭开，对应地雷从盘面上移除
+            hp += 1;
+            cell.revealed = true;
+            normalMineCount--;
+            // 记录事件
+            gameHistory.add("标记正确 - HP +1");
+            
+            // 若是国王，被右键标记直接胜利
+            if (cell.isKing) {
+                refreshAllButtons();
+                gameHistory.add("游戏胜利 - 右键标记了国王雷！");
+                // 检查国王猎手成就
+                if (!achievements.get(Achievement.KING_HUNTER)) {
+                    unlockAchievement(Achievement.KING_HUNTER);
+                }
+                showGameOverDialog(true, "你成功右键标记了国王雷！胜利！");
+                return;
+            }
+            
+            // 若是内鬼核心：立即捕获该内鬼（该内鬼区失效）
+            if (cell.informerId != -1 && informerMines[cell.informerId].contains(new Point(r,c))) {
+                int id = cell.informerId;
+                // 移除区内雷并标记失效
+                for (Point p : informerMines[id]) {
+                    board[p.x][p.y].isNormalMine = false;
+                    board[p.x][p.y].isInformerCore = false;
+                    board[p.x][p.y].informerId = -1;
+                }
+                informerMines[id].clear();
+                informerActive[id] = false; // 捕获
+                gameHistory.add("捕获内鬼" + (id+1) + " - 获取情报");
+                
+                // 检查内鬼大师成就
+                checkInformerMasterAchievement();
+            } else {
+                // 普通雷被正确标记 -> 移除（被排雷）
+                cell.isNormalMine = false;
+                minesCleared++;
+                totalMinesCleared++;
+            }
+            
+            computeAllNumbers();
+            refreshAllButtons();
+        } else {
+            wrongFlags++;
+            consecutiveCorrectFlags = 0;
+            // 标记错误：HP -1，保持未揭开，Phase A 立即结束
+            hp -= getHpPenalty(1);
+            cell.flagged = false;
+            gameHistory.add("标记错误 - HP -" + getHpPenalty(1) + "，Phase A 结束");
+            endPhaseA(); // 触发 Phase B
+        }
+    }
+
+    /**
+     * 判断是否可以对 (r,c) 点击/标记：该格必须是未知格，并且位于任意已揭开格的 8 邻域内
+     * 注意：国王雷区始终可点击，不受此限制
+     */
+    private boolean isValidClickPosition(int r, int c) {
+        if (board[r][c].revealed) return false;
+        
+        // 国王雷区始终可点击
+        if (r >= SIZE - KING_ZONE_SIZE && c >= SIZE - KING_ZONE_SIZE) {
+            return true;
+        }
+        
+        for (int dr = -1; dr <= 1; dr++) {
+            for (int dc = -1; dc <= 1; dc++) {
+                if (dr==0 && dc==0) continue;
+                int rr = r + dr, cc = c + dc;
+                if (inBounds(rr, cc) && board[rr][cc].revealed) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 揭开格子（标准 flood fill：number==0 扩展）
+     * 优化版：修复边缘格子洪水填充问题
+     */
+    private void revealCell(int r, int c) {
+        if (!inBounds(r,c)) return;
+        if (board[r][c].revealed) return;
+        
+        // 如果是地雷，不揭开（由爆炸逻辑处理）
+        if (board[r][c].isKing || board[r][c].isNormalMine || 
+            (board[r][c].informerId != -1 && informerActive[board[r][c].informerId] && 
+             informerMines[board[r][c].informerId].contains(new Point(r,c)))) {
+            return;
+        }
+        
+        Queue<Point> queue = new LinkedList<>();
+        queue.add(new Point(r, c));
+        
+        while (!queue.isEmpty()) {
+            Point p = queue.poll();
+            int pr = p.x;
+            int pc = p.y;
+            
+            // 检查边界和是否已揭开
+            if (!inBounds(pr, pc) || board[pr][pc].revealed) continue;
+            
+            // 揭开当前格子
+            board[pr][pc].revealed = true;
+            board[pr][pc].flagged = false;
+            
+            // 如果数字为0，继续展开周围
+            if (board[pr][pc].number == 0) {
+                for (int dr = -1; dr <= 1; dr++) {
+                    for (int dc = -1; dc <= 1; dc++) {
+                        if (dr == 0 && dc == 0) continue;
+                        int nr = pr + dr;
+                        int nc = pc + dc;
+                        
+                        // 只添加未揭开的非地雷格子
+                        if (inBounds(nr, nc) && !board[nr][nc].revealed && 
+                            !board[nr][nc].isKing && !board[nr][nc].isNormalMine &&
+                            !(board[nr][nc].informerId != -1 && informerActive[board[nr][nc].informerId] && 
+                              informerMines[board[nr][nc].informerId].contains(new Point(nr, nc)))) {
+                            queue.add(new Point(nr, nc));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 结束 Phase A（玩家主动按按钮或被错误标记触发），进入 Phase B
+     */
+    private void endPhaseA() {
+        phaseA = false;
+        refreshAllButtons();
+        enterPhaseB();
+    }
+
+    // ===== Phase B 实现（按顺序） =====
+    
+    /**
+     * 进入 Phase B 环境阶段
+     */
+    private void enterPhaseB() {
+        currentTurn++;
+        gameHistory.add("========== 第 " + currentTurn + " 回合 Phase B 开始 ==========");
+        
+        // 1) 国王雷重置（随机移动到右下 5x5 区域）
+        board[kingRow][kingCol].isKing = false;
+        placeKingRandom();
+        gameHistory.add("国王雷重置 - 新位置: (" + kingRow + "," + kingCol + ")");
+
+        // 2) 内鬼区刷新 - 修改：整个内鬼区（5x5）的数字随机加减
+        Map<Point, Integer> jitter = new HashMap<>();
+        for (int id = 0; id < 2; id++) {
+            if (!informerActive[id]) continue; // 已捕获的区不再影响
+            
+            Point tl = informerZoneTL[id];
+            // 遍历整个内鬼区（5x5）
+            for (int dr = 0; dr < INFORMER_ZONE_SIZE; dr++) {
+                for (int dc = 0; dc < INFORMER_ZONE_SIZE; dc++) {
+                    int rr = tl.x + dr, cc = tl.y + dc;
+                    if (!inBounds(rr,cc)) continue;
+                    // 如果该位置不是雷，则其显示的数字可能随机 +1/-1
+                    boolean isMineHere = board[rr][cc].isKing
+                            || (board[rr][cc].informerId != -1 && informerMines[board[rr][cc].informerId].contains(new Point(rr,cc)))
+                            || board[rr][cc].isNormalMine;
+                    if (!isMineHere) {
+                        // 随机 +1 或 -1
+                        jitter.put(new Point(rr,cc), rand.nextBoolean() ? 1 : -1);
+                    }
+                }
+            }
+        }
+        
+        if (!jitter.isEmpty()) {
+            gameHistory.add("内鬼区数字干扰 - 影响格子数: " + jitter.size() + " (整个内鬼区)");
+        }
+
+        // 3) 视野收缩：所有已揭开且与至少一个未知格相邻的格子全部变回未揭开
+        List<Point> toHide = new ArrayList<>();
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                if (!board[r][c].revealed) continue;
+                boolean hasUnknownAdj = false;
+                for (int dr = -1; dr <= 1 && !hasUnknownAdj; dr++) {
+                    for (int dc = -1; dc <= 1; dc++) {
+                        if (dr==0 && dc==0) continue;
+                        int rr = r + dr, cc = c + dc;
+                        if (!inBounds(rr,cc)) continue;
+                        if (!board[rr][cc].revealed) { hasUnknownAdj = true; break; }
+                    }
+                }
+                if (hasUnknownAdj) toHide.add(new Point(r,c));
+            }
+        }
+        
+        for (Point p : toHide) {
+            board[p.x][p.y].revealed = false;
+            // 立即清理按钮状态
+            JButton btn = buttons[p.x][p.y];
+            btn.setText("");  // 清除文字
+            btn.setIcon(null); // 清除图标
+            btn.setBackground(UIManager.getColor("Button.background")); // 重置背景
+            btn.setForeground(Color.BLACK); // 重置文字颜色
+            // 注意：国王雷区有特殊边框
+            boolean isKingZone = (p.x >= SIZE - KING_ZONE_SIZE && p.y >= SIZE - KING_ZONE_SIZE);
+            if (isKingZone) {
+                btn.setBorder(BorderFactory.createLineBorder(Color.BLUE, 2));
+            } else {
+                btn.setBorder(BorderFactory.createLineBorder(Color.GRAY, 1));
+            }
+        }
+        
+        gameHistory.add("视野收缩 - 隐藏格子数: " + toHide.size());
+
+        // 4) 普通雷增殖 20%（考虑难度倍率），并在所有"未揭开格"中随机分布（不包括内鬼区，不包括左上初始区）
+        int add = (int)Math.floor(normalMineCount * NORMAL_GROWTH_RATE * GROWTH_RATE_MULTIPLIER);
+        normalMineCount += add;
+        gameHistory.add("普通雷增殖 - 新增: " + add + "，总数: " + normalMineCount);
+        
+        // 清除非内鬼区的普通雷标记，重新分配
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                if (board[r][c].informerId == -1) board[r][c].isNormalMine = false;
+            }
+        }
+        
+        List<Point> avail = new ArrayList<>();
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                if (board[r][c].informerId != -1) continue;
+                if (r < TOPLEFT_INIT_OPEN && c < TOPLEFT_INIT_OPEN) continue;
+                if (board[r][c].revealed) continue; // 只在未揭开格中分配
+                avail.add(new Point(r,c));
+            }
+        }
+        
+        Collections.shuffle(avail, rand);
+        int place = Math.min(normalMineCount, avail.size());
+        for (int i = 0; i < place; i++) {
+            Point p = avail.get(i);
+            board[p.x][p.y].isNormalMine = true;
+        }
+        
+        // 保证国王标记仍然有效
+        board[kingRow][kingCol].isKing = true;
+
+        // 5) 重新计算数字并应用内鬼产生的 jitter 随机 +1/-1 效果（仅用于显示）
+        computeAllNumbers();
+        for (Map.Entry<Point, Integer> e : jitter.entrySet()) {
+            Point p = e.getKey();
+            int newNumber = board[p.x][p.y].number + e.getValue();
+            // 确保干扰后内鬼区数字至少为1
+            for (int id = 0; id < 2; id++) {
+                if (informerActive[id] && 
+                    p.x >= informerZoneTL[id].x && p.x < informerZoneTL[id].x + INFORMER_ZONE_SIZE &&
+                    p.y >= informerZoneTL[id].y && p.y < informerZoneTL[id].y + INFORMER_ZONE_SIZE) {
+                    
+                    // 如果不是地雷，确保数字至少为1
+                    if (!board[p.x][p.y].isKing && 
+                        !(board[p.x][p.y].informerId != -1 && informerMines[board[p.x][p.y].informerId].contains(p)) &&
+                        !board[p.x][p.y].isNormalMine) {
+                        
+                        newNumber = Math.max(1, newNumber);
+                    }
+                    break;
+                }
+            }
+            board[p.x][p.y].number = newNumber;
+        }
+
+        // 6) 控制区检查：若已揭开格数 < 20 则失败
+        int rc = 0;
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                if (board[r][c].revealed) rc++;
+            }
+        }
+        revealedCount = rc;
+        
+        if (revealedCount < 20) {
+            gameHistory.add("游戏失败 - 控制区小于20: " + revealedCount);
+            refreshAllButtons();
+            showGameOverDialog(false, "控制区（已揭开格数）小于 20，游戏失败。");
+            return;
+        }
+
+        // 保存当前棋盘状态
+        saveBoardState();
+        // Phase B 完成，回到 Phase A
+        phaseA = true;
+        refreshAllButtons();
+
+        // 检查 HP 是否归零或以下
+        if (hp <= 0) {
+            gameHistory.add("游戏失败 - HP归零");
+            showGameOverDialog(false, "生命值 HP 已降为 0，游戏失败。");
+            return;
+        }
+        
+        gameHistory.add("第 " + currentTurn + " 回合 Phase B 结束");
+    }
+
+    // ========== 新增功能方法 ==========
+
+    /**
+     * 根据难度获取生命值扣除倍数
+     */
+    private int getHpPenalty(int base) {
+        return base * HP_PENALTY_MULTIPLIER;
+    }
+
+    /**
+     * 保存当前棋盘状态到历史记录
+     */
+    private void saveBoardState() {
+        int[][] state = new int[SIZE][SIZE];
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                Cell cell = board[r][c];
+                int code = 0;
+                if (cell.revealed) code |= 1;
+                if (cell.flagged) code |= 2;
+                if (cell.isNormalMine) code |= 4;
+                if (cell.isKing) code |= 8;
+                if (cell.isInformerCore) code |= 16;
+                code |= (cell.number << 5);
+                state[r][c] = code;
+            }
+        }
+        boardHistory.add(state);
+    }
+
+    /**
+     * 检查胜利条件（揭开所有非雷格）
+     */
+    private void checkWinCondition() {
+        boolean allNonMinesRevealed = true;
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                Cell cell = board[r][c];
+                if (!cell.isKing && !cell.isNormalMine && 
+                    !(cell.informerId != -1 && informerActive[cell.informerId] && 
+                      informerMines[cell.informerId].contains(new Point(r,c)))) {
+                    if (!cell.revealed) {
+                        allNonMinesRevealed = false;
+                        break;
+                    }
+                }
+            }
+            if (!allNonMinesRevealed) break;
+        }
+        
+        if (allNonMinesRevealed) {
+            gameHistory.add("游戏胜利 - 揭开了所有非雷格！");
+            showGameOverDialog(true, "你揭开了所有非雷格！胜利！");
+        }
+    }
+
+    /**
+     * 显示游戏结束对话框
+     */
+    private void showGameOverDialog(boolean isWin, String message) {
+        gameEnded = true;
+        
+        // 检查成就
+        checkAchievements(isWin);
+        
+        // 显示完整地图
+        revealAllMinesAndShowWrongFlags();
+        
+        // 计算游戏时间
+        long endTime = System.currentTimeMillis();
+        long playTime = (endTime - startTime) / 1000;
+        
+        // 创建结果信息
+        String resultInfo = "<html><div style='width:400px'>" +
+                "<h2>" + (isWin ? "🎉 恭喜你胜利了！" : "💀 游戏结束") + "</h2>" +
+                "<p><b>游戏结果:</b> " + message + "</p>" +
+                "<p><b>游戏时间:</b> " + playTime + " 秒</p>" +
+                "<p><b>游戏回合:</b> " + currentTurn + "</p>" +
+                "<p><b>最终HP:</b> " + hp + "</p>" +
+                "<p><b>总操作数:</b> " + totalMoves + "</p>" +
+                "<p><b>正确标记:</b> " + correctFlags + "</p>" +
+                "<p><b>错误标记:</b> " + wrongFlags + "</p>" +
+                "<p><b>清除地雷:</b> " + minesCleared + "</p>" +
+                "<p><b>正确率:</b> " + (totalMoves > 0 ? 
+                    String.format("%.1f%%", (correctFlags * 100.0 / totalMoves)) : "0%") + "</p>" +
+                "</div></html>";
+        
+        // 创建选项按钮
+        Object[] options = {"查看地图详情", "查看成就", "重新开始", "退出游戏"};
+        int choice = JOptionPane.showOptionDialog(this, 
+                resultInfo, 
+                "游戏结束", 
+                JOptionPane.DEFAULT_OPTION, 
+                JOptionPane.INFORMATION_MESSAGE, 
+                null, options, options[0]);
+        
+        switch (choice) {
+            case 0 -> showDeathMapDetails();
+            case 1 -> showAchievements();
+            case 2 -> restartGame();
+            default -> System.exit(0);
+        }
+    }
+
+    /**
+     * 死亡时展示地图详情
+     */
+    private void showDeathMapDetails() {
+        JDialog detailDialog = new JDialog(this, "游戏地图详情", true);
+        detailDialog.setSize(1000, 700);
+        detailDialog.setLocationRelativeTo(this);
+        
+        JPanel mainPanel = new JPanel(new BorderLayout());
+        
+        // 地图展示面板
+        JPanel mapPanel = new JPanel(new GridLayout(SIZE, SIZE));
+        mapPanel.setPreferredSize(new Dimension(CELL_PIX * SIZE, CELL_PIX * SIZE));
+        
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                JLabel cellLabel = new JLabel("", SwingConstants.CENTER);
+                cellLabel.setOpaque(true);
+                cellLabel.setBorder(BorderFactory.createLineBorder(Color.GRAY));
+                cellLabel.setFont(new Font("微软雅黑", Font.BOLD, 10));
+                
+                Cell cell = board[r][c];
+                
+                // 设置背景色
+                Color bgColor = new Color(200, 200, 200); // 默认灰色
+                
+                // 特殊区域标识
+                if (r >= SIZE - KING_ZONE_SIZE && c >= SIZE - KING_ZONE_SIZE) {
+                    bgColor = new Color(255, 255, 180); // 国王区浅黄色
+                }
+                
+                // 只对活跃的内鬼区显示紫色
+                for (int id = 0; id < 2; id++) {
+                    if (informerActive[id] && 
+                        r >= informerZoneTL[id].x && r < informerZoneTL[id].x + INFORMER_ZONE_SIZE &&
+                        c >= informerZoneTL[id].y && c < informerZoneTL[id].y + INFORMER_ZONE_SIZE) {
+                        bgColor = new Color(255, 200, 255); // 内鬼区浅紫色
+                    }
+                }
+                
+                // 设置内容 - 使用图标
+                ImageIcon icon = null;
+                Color fgColor = Color.BLACK;
+                
+                if (cell.isKing) {
+                    icon = kingMineIcon;
+                    bgColor = new Color(255, 215, 0); // 金色
+                } else if (cell.isInformerCore && cell.informerId != -1 && informerActive[cell.informerId]) {
+                    icon = informerMineIcon;
+                    bgColor = new Color(255, 100, 255); // 深紫色
+                    fgColor = Color.WHITE;
+                } else if (cell.informerId != -1 && informerActive[cell.informerId] && 
+                         informerMines[cell.informerId].contains(new Point(r,c))) {
+                    icon = mineIcon;
+                    bgColor = new Color(200, 150, 255); // 浅紫色
+                } else if (cell.isNormalMine) {
+                    icon = mineIcon;
+                    bgColor = new Color(255, 150, 150); // 浅红色
+                } else if (cell.revealed) {
+                    if (cell.number > 0) {
+                        cellLabel.setText(String.valueOf(cell.number));
+                        if (cell.number <= NUMBER_COLORS.length) {
+                            fgColor = NUMBER_COLORS[cell.number - 1];
+                        }
+                    }
+                }
+                
+                // 标记
+                if (cell.flagged) {
+                    cellLabel.setText("F");
+                    fgColor = Color.BLACK;
+                }
+                
+                if (icon != null) {
+                    cellLabel.setIcon(icon);
+                }
+                cellLabel.setForeground(fgColor);
+                cellLabel.setBackground(bgColor);
+                mapPanel.add(cellLabel);
+            }
+        }
+        
+        // 信息面板
+        JPanel infoPanel = new JPanel();
+        infoPanel.setLayout(new BoxLayout(infoPanel, BoxLayout.Y_AXIS));
+        infoPanel.setBorder(BorderFactory.createEmptyBorder(10,10,10,10));
+        
+        // 图例
+        JPanel legendPanel = new JPanel(new GridLayout(0, 2, 5, 5));
+        legendPanel.setBorder(BorderFactory.createTitledBorder("图例说明"));
+        
+        // 创建小图标用于图例
+        ImageIcon smallMineIcon = resizeIcon(mineIcon, 16, 16);
+        ImageIcon smallKingIcon = resizeIcon(kingMineIcon, 16, 16);
+        ImageIcon smallInformerIcon = resizeIcon(informerMineIcon, 16, 16);
+        
+        addLegendItemWithIcon(legendPanel, smallKingIcon, "国王雷");
+        addLegendItemWithIcon(legendPanel, smallInformerIcon, "内鬼核心");
+        addLegendItemWithIcon(legendPanel, smallMineIcon, "普通雷");
+        addLegendItem(legendPanel, "", new Color(200, 150, 255), "内鬼区雷");
+        addLegendItem(legendPanel, "F", Color.BLACK, "标记");
+        addLegendItem(legendPanel, "", new Color(255, 255, 180), "国王区");
+        addLegendItem(legendPanel, "", new Color(255, 200, 255), "内鬼区（活跃）");
+        addLegendItem(legendPanel, "数字", Color.BLACK, "安全格");
+        
+        // 统计信息
+        JTextArea statsArea = new JTextArea();
+        statsArea.setEditable(false);
+        statsArea.setFont(new Font("微软雅黑", Font.PLAIN, 12));
+        statsArea.setText("""
+            ========== 游戏统计 ==========
+            游戏难度: """ + currentDifficulty.name + """
+            游戏回合: """ + currentTurn + """
+            最终HP: """ + hp + """
+            总操作数: """ + totalMoves + """
+            正确标记: """ + correctFlags + """
+            错误标记: """ + wrongFlags + """
+            清除地雷: """ + minesCleared + """
+            剩余普通雷: """ + normalMineCount + """
+            已揭开格子: """ + revealedCount + """
+            内鬼1状态: """ + (informerActive[0] ? "活跃" : "已捕获") + """
+            内鬼2状态: """ + (informerActive[1] ? "活跃" : "已捕获") + """
+            国王位置: (""" + kingRow + "," + kingCol + ")\n");
+        
+        infoPanel.add(legendPanel);
+        infoPanel.add(Box.createVerticalStrut(10));
+        infoPanel.add(new JScrollPane(statsArea));
+        
+        // 按钮面板
+        JPanel buttonPanel = new JPanel();
+        JButton exitButton = new JButton("退出游戏");
+        
+        exitButton.addActionListener(e -> System.exit(0));
+        
+        buttonPanel.add(exitButton);
+        
+        mainPanel.add(new JScrollPane(mapPanel), BorderLayout.CENTER);
+        mainPanel.add(infoPanel, BorderLayout.EAST);
+        mainPanel.add(buttonPanel, BorderLayout.SOUTH);
+        
+        detailDialog.add(mainPanel);
+        detailDialog.setVisible(true);
+    }
+    
+    /**
+     * 调整图标大小
+     */
+    private ImageIcon resizeIcon(ImageIcon icon, int width, int height) {
+        Image img = icon.getImage();
+        Image resizedImg = img.getScaledInstance(width, height, Image.SCALE_SMOOTH);
+        return new ImageIcon(resizedImg);
+    }
+    
+    /**
+     * 添加图例项（带图标）
+     */
+    private void addLegendItemWithIcon(JPanel panel, ImageIcon icon, String description) {
+        JPanel itemPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JLabel iconLabel = new JLabel(icon);
+        JLabel descLabel = new JLabel(description);
+        
+        itemPanel.add(iconLabel);
+        itemPanel.add(Box.createHorizontalStrut(5));
+        itemPanel.add(descLabel);
+        
+        panel.add(itemPanel);
+    }
+    
+    /**
+     * 添加图例项
+     */
+    private void addLegendItem(JPanel panel, String symbol, Color color, String description) {
+        JPanel itemPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JLabel symbolLabel = new JLabel(symbol);
+        symbolLabel.setOpaque(true);
+        symbolLabel.setBackground(color);
+        symbolLabel.setPreferredSize(new Dimension(16, 16));
+        symbolLabel.setBorder(BorderFactory.createLineBorder(Color.GRAY));
+        symbolLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        
+        JLabel descLabel = new JLabel(description);
+        
+        itemPanel.add(symbolLabel);
+        itemPanel.add(Box.createHorizontalStrut(5));
+        itemPanel.add(descLabel);
+        
+        panel.add(itemPanel);
+    }
+
+    /**
+     * 显示游戏教程
+     */
+    private void showTutorial() {
+        tutorialDialog.setVisible(true);
+    }
+    
+    /**
+     * 显示游戏规则
+     */
+    private void showRules() {
+        JTextArea rulesText = new JTextArea();
+        rulesText.setEditable(false);
+        rulesText.setFont(new Font("微软雅黑", Font.PLAIN, 14));
+        rulesText.setText("""
+            ==================== 扫雷 Pro 游戏规则 ====================
+
+            游戏概述
+            游戏目标：在动态变化的棋盘中找到并成功处理'国王雷'，从而获得胜利。
+            胜利条件：左键揭开国王雷或右键标记国王雷，国王雷仅一个，在右下角5*5区域，每回合刷新位置
+            失败条件：HP降至0或控制区（已揭开格数量）小于20（开局左上角为控制区）。
+            整个游戏每回合依次经历Phase A和Phase B。
+            Phase A：玩家操作阶段，玩家可点击已展开区域的相邻地块,左键展开，右键标雷，点到地雷连锁爆炸，错误行动进入PhaseB
+            Phase B：环境阶段，与未展开地区相邻的地块变为未展开，地雷在未展开区域刷新，数量增加
+            特殊规则：
+            场地内存在两个特殊地雷（内鬼雷），特殊地雷周围5*5地块的数字不准确（不会为空白，数字随机加减）
+            成功找出内鬼雷会获得持续更新的国王雷坐标
+            地雷爆炸，血量-1，周围3*3发生连锁爆炸
+            困难模式：扣血翻倍
+            国王雷区（右下5x5蓝色边框）：始终可点击，无需相邻已揭开格
+            注意：由于刷新限制，请勿过快点击，有概率点不上
+            """);
+        
+        JOptionPane.showMessageDialog(this, new JScrollPane(rulesText), 
+                "游戏规则", JOptionPane.INFORMATION_MESSAGE);
+    }
+    
+    /**
+     * 显示关于信息
+     */
+    private void showAbout() {
+        String aboutText = """
+            <html><div style='width:400px'>
+            <h2>扫雷 Pro 增强版 v5.1</h2>
+            <p><b>版本:</b> 5.1（优化版）</p>
+            <p><b>作者:</b> Java大作业项目组</p>
+            <p><b>优化内容:</b></p>
+            <ul>
+            <li>鼠标监听效率优化，避免点击无响应</li>
+            <li>修复边缘格子洪水填充问题</li>
+            <li>困难模式生命值扣除翻倍</li>
+            <li>国王雷区特殊处理（蓝色边框，始终可点击）</li>
+            <li>完整的扫雷Pro游戏实现</li>
+            <li>内鬼雷固定在内鬼区最中间</li>
+            <li>整个内鬼区数字随机变化</li>
+            <li>已揭开区域有黑色边框</li>
+            <li>连锁爆炸动画效果</li>
+            <li>难度选择和成就系统</li>
+            </ul>
+            <p><b>游戏说明:</b> 这是一款基于传统扫雷的增强版游戏，
+            加入了多种特殊机制和策略元素，提供了更加丰富的游戏体验。</p>
+            </div></html>""";
+        
+        JOptionPane.showMessageDialog(this, aboutText, "关于游戏", 
+                JOptionPane.INFORMATION_MESSAGE);
+    }
+    
+    /**
+     * 显示游戏历史
+     */
+    private void showGameHistory() {
+        JDialog historyDialog = new JDialog(this, "游戏历史记录", false);
+        historyDialog.setSize(600, 400);
+        historyDialog.setLocationRelativeTo(this);
+        
+        JTextArea historyText = new JTextArea();
+        historyText.setEditable(false);
+        historyText.setFont(new Font("微软雅黑", Font.PLAIN, 12));
+        
+        StringBuilder sb = new StringBuilder();
+        sb.append("========== 游戏历史记录 ==========\n\n");
+        for (String record : gameHistory) {
+            sb.append(record).append("\n");
+        }
+        
+        historyText.setText(sb.toString());
+        
+        historyDialog.add(new JScrollPane(historyText));
+        historyDialog.setVisible(true);
+    }
+    
+    /**
+     * 显示游戏统计
+     */
+    private void showGameStatistics() {
+        long currentTime = System.currentTimeMillis();
+        long playTime = (currentTime - startTime) / 1000;
+        
+        String statsText = """
+            <html><div style='width:400px'>
+            <h2>游戏统计信息</h2>
+            <p><b>游戏时间:</b> %d 秒</p>
+            <p><b>游戏难度:</b> %s</p>
+            <p><b>当前回合:</b> %d</p>
+            <p><b>当前HP:</b> %d</p>
+            <p><b>总操作数:</b> %d</p>
+            <p><b>正确标记:</b> %d</p>
+            <p><b>错误标记:</b> %d</p>
+            <p><b>清除地雷:</b> %d</p>
+            <p><b>正确率:</b> %s</p>
+            <p><b>当前普通雷数量:</b> %d</p>
+            <p><b>已揭开格子:</b> %d / %d (%.1f%%)</p>
+            <p><b>内鬼1状态:</b> %s</p>
+            <p><b>内鬼2状态:</b> %s</p>
+            <p><b>国王位置:</b> (%d, %d)</p>
+            </div></html>""".formatted(
+            playTime, currentDifficulty.name, currentTurn, hp,
+            totalMoves, correctFlags, wrongFlags, minesCleared,
+            (totalMoves > 0 ? String.format("%.1f%%", (correctFlags * 100.0 / totalMoves)) : "0%"),
+            normalMineCount, revealedCount, (SIZE * SIZE),
+            (revealedCount * 100.0 / (SIZE * SIZE)),
+            (informerActive[0] ? "活跃" : "已捕获"),
+            (informerActive[1] ? "活跃" : "已捕获"),
+            kingRow, kingCol
+        );
+        
+        JOptionPane.showMessageDialog(this, statsText, "游戏统计", 
+                JOptionPane.INFORMATION_MESSAGE);
+    }
+    
+    /**
+     * 显示成就系统
+     */
+    private void showAchievements() {
+        JDialog achievementsDialog = new JDialog(this, "成就系统", true);
+        achievementsDialog.setSize(500, 400);
+        achievementsDialog.setLocationRelativeTo(this);
+        
+        JPanel mainPanel = new JPanel(new BorderLayout());
+        
+        JTextArea achievementsText = new JTextArea();
+        achievementsText.setEditable(false);
+        achievementsText.setFont(new Font("微软雅黑", Font.PLAIN, 12));
+        
+        StringBuilder sb = new StringBuilder();
+        sb.append("========== 成就系统 ==========\n\n");
+        sb.append("已解锁成就: ").append(getUnlockedAchievementsCount()).append(" / ").append(Achievement.values().length).append("\n\n");
+        
+        for (Achievement ach : Achievement.values()) {
+            boolean unlocked = achievements.get(ach);
+            sb.append(unlocked ? "✅ " : "❌ ");
+            sb.append(ach.name).append("\n");
+            sb.append("   ").append(ach.description).append("\n");
+            if (unlocked) {
+                sb.append("   [已解锁]\n");
+            } else {
+                sb.append("   [未解锁]\n");
+            }
+            sb.append("\n");
+        }
+        
+        achievementsText.setText(sb.toString());
+        
+        mainPanel.add(new JScrollPane(achievementsText), BorderLayout.CENTER);
+        
+        JButton closeButton = new JButton("关闭");
+        closeButton.addActionListener(e -> achievementsDialog.dispose());
+        
+        JPanel buttonPanel = new JPanel();
+        buttonPanel.add(closeButton);
+        mainPanel.add(buttonPanel, BorderLayout.SOUTH);
+        
+        achievementsDialog.add(mainPanel);
+        achievementsDialog.setVisible(true);
+    }
+    
+    /**
+     * 获取已解锁成就数量
+     */
+    private int getUnlockedAchievementsCount() {
+        int count = 0;
+        for (Achievement ach : Achievement.values()) {
+            if (achievements.get(ach)) {
+                count++;
+            }
+        }
+        return count;
+    }
+    
+    /**
+     * 更改游戏难度
+     */
+    private void changeDifficulty() {
+        String[] options = {"简单", "普通", "困难"};
+        int choice = JOptionPane.showOptionDialog(this, """
+                                                        更改难度将会重新开始游戏，当前进度将丢失。
+                                                        
+                                                        请选择新的难度：
+                                                        简单：初始地雷较少，生命值较高，扣血正常
+                                                        普通：标准难度，平衡的游戏体验，扣血正常
+                                                        困难：初始地雷较多，生命值较低，地雷增殖更快，扣血翻倍""",
+            "更改难度",
+            JOptionPane.DEFAULT_OPTION,
+            JOptionPane.QUESTION_MESSAGE,
+            null,
+            options,
+            currentDifficulty.ordinal()
+        );
+        
+        if (choice == JOptionPane.CLOSED_OPTION) {
+            return;
+        }
+        
+        switch (choice) {
+            case 0 -> currentDifficulty = Difficulty.EASY;
+            case 1 -> currentDifficulty = Difficulty.NORMAL;
+            case 2 -> currentDifficulty = Difficulty.HARD;
+        }
+        
+        restartGame();
+    }
+    
+    /**
+     * 开始新游戏
+     */
+    private void newGame() {
+        int result = JOptionPane.showConfirmDialog(this, 
+                "确定要开始新游戏吗？当前游戏进度将丢失。", 
+                "新游戏", JOptionPane.YES_NO_OPTION);
+        
+        if (result == JOptionPane.YES_OPTION) {
+            restartGame();
+        }
+    }
+    
+    /**
+     * 重新开始游戏
+     */
+    private void restartGame() {
+        // 显示难度选择
+        showDifficultySelection();
+        
+        // 重置游戏状态
+        hp = currentDifficulty.initialHP;
+        normalMineCount = currentDifficulty.initialMines;
+
+        currentTurn = 1;
+        phaseA = true;
+        gameEnded = false;
+        
+        totalMoves = 0;
+        correctFlags = 0;
+        wrongFlags = 0;
+        minesCleared = 0;
+        totalMinesCleared = 0;
+        consecutiveCorrectFlags = 0;
+        startTime = System.currentTimeMillis();
+        
+        // 清空历史记录
+        gameHistory.clear();
+        boardHistory.clear();
+        gameHistory.add("新游戏开始 - 时间: " + new Date());
+        gameHistory.add("难度: " + currentDifficulty.name);
+        
+        // 根据难度设置参数
+        INITIAL_NORMAL_MINES = currentDifficulty.initialMines;
+        INITIAL_HP = currentDifficulty.initialHP;
+        GROWTH_RATE_MULTIPLIER = currentDifficulty.growthMultiplier;
+        HP_PENALTY_MULTIPLIER = currentDifficulty.hpPenaltyMultiplier;
+        
+        // 重新初始化游戏
+        initBoard();
+        placeInformerZones();
+        placeInformerMines();
+        placeKingRandom();
+        placeNormalMinesInitial();
+        computeAllNumbers();
+        openInitialTopLeft();
+        saveBoardState();
+        
+        refreshAllButtons();
+        updateInfoLabels();
+    }
+
+    // ========== 工具函数 ==========
+    
+    /**
+     * 判断是否在棋盘内
+     */
+    private boolean inBounds(int r, int c) { 
+        return r >= 0 && r < SIZE && c >= 0 && c < SIZE; 
+    }
+
+    /**
+     * 计算并显示全部地雷（游戏结束时可用）
+     */
+    private void revealAllMinesAndShowWrongFlags() {
+        for (int r = 0; r < SIZE; r++) {
+            for (int c = 0; c < SIZE; c++) {
+                Cell cell = board[r][c];
+                JButton btn = buttons[r][c];
+                
+                // 揭开所有格子
+                cell.revealed = true;
+                
+                // 国王雷区有特殊边框
+                boolean isKingZone = (r >= SIZE - KING_ZONE_SIZE && c >= SIZE - KING_ZONE_SIZE);
+                
+                if (isKingZone) {
+                    btn.setBorder(BorderFactory.createLineBorder(Color.BLUE, 2));
+                } else {
+                    btn.setBorder(BorderFactory.createLineBorder(Color.BLACK, 2));
+                }
+                
+                if (cell.isKing) {
+                    btn.setIcon(kingMineIcon);
+                    btn.setText("");
+                    btn.setBackground(new Color(255,215,0));
+                } else if (cell.isInformerCore && cell.informerId != -1 && informerActive[cell.informerId]) {
+                    btn.setIcon(informerMineIcon);
+                    btn.setText("");
+                    btn.setBackground(new Color(255,180,180));
+                } else if (cell.informerId != -1 && informerActive[cell.informerId] && 
+                         informerMines[cell.informerId].contains(new Point(r,c))) {
+                    btn.setIcon(mineIcon);
+                    btn.setText("");
+                    btn.setBackground(new Color(255, 180, 180));
+                } else if (cell.isNormalMine) {
+                    btn.setIcon(mineIcon);
+                    btn.setText("");
+                    btn.setBackground(new Color(255, 150, 150));
+                } else {
+                    btn.setIcon(null);
+                    if (cell.number > 0) {
+                        btn.setText(String.valueOf(cell.number));
+                        if (cell.number <= NUMBER_COLORS.length) {
+                            btn.setForeground(NUMBER_COLORS[cell.number - 1]);
+                        }
+                    }
+                }
+                
+                // 标记显示
+                if (cell.flagged) {
+                    btn.setForeground(Color.BLACK);
+                }
+                
+                btn.setEnabled(false);
+            }
+        }
+    }
+
+    // ======= 主函数 =======
+    public static void main(String[] args) {
+        try {
+            // 设置系统外观
+            UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+        } catch (ClassNotFoundException | IllegalAccessException | InstantiationException | UnsupportedLookAndFeelException e) {
+            e.printStackTrace();
+        }
+        
+        SwingUtilities.invokeLater(() -> {
+            MinesweeperProEnhancedFinal game = new MinesweeperProEnhancedFinal();
+            game.setVisible(true);
+            
+            // 显示欢迎消息
+            JOptionPane.showMessageDialog(game, 
+                    """
+                    <html><div style='width:400px'>
+                    <h2>欢迎来到扫雷 Pro 增强版 v5.1！</h2>
+
+                    ==================== 扫雷 Pro 游戏规则 ====================
+
+                    <ul>
+                    <li><b>游戏概述</li>
+                    <li><b>游戏目标：在动态变化的棋盘中找到并成功处理'国王雷'，从而获得胜利。</li>
+                    <li><b>胜利条件：左键揭开国王雷或右键标记国王雷，国王雷仅一个，在右下角5*5区域，每回合刷新位置</li>
+                    <li><b>失败条件：HP降至0或控制区（已揭开格数量）小于20（开局左上角为控制区）。</li>
+                    <li><b>整个游戏每回合依次经历Phase A和Phase B。</li>
+                    <li><b>Phase A：玩家操作阶段，玩家可点击已展开区域的相邻地块,左键展开，右键标雷，点到地雷连锁爆炸，错误行动进入PhaseB</li>
+                    <li><b>Phase B：环境阶段，与未展开地区相邻的地块变为未展开，地雷在未展开区域刷新，数量增加</li>
+                    <li><b>特殊规则：</li>
+                    <li><b>场地内存在两个特殊地雷（内鬼雷），特殊地雷周围5*5地块的数字不准确（不会为空白，数字随机加减）</li>
+                    <li><b>成功找出内鬼雷会获得持续更新的国王雷坐标</li>
+                    <li><b>地雷爆炸，血量-1，周围3*3发生连锁爆炸</li>
+                    <li><b>困难模式：扣血翻倍</li>
+                    <li><b>国王雷区（右下5x5蓝色边框）：始终可点击，无需相邻已揭开格</li>
+                    <li><b>成就系统：</b>记录你的游戏成就</li>
+                    </ul>
+                    <p>建议先查看<b>游戏教程</b>了解详细规则和策略。</p>
+
+                    </div></html>""", 
+                    
+                    "欢迎", JOptionPane.INFORMATION_MESSAGE);
+        });
+    }
+}

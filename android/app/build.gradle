@@ -1,0 +1,50 @@
+plugins { id 'com.android.application' }
+
+def signingFile = rootProject.file('signing/release.properties')
+def signing = new Properties()
+if (signingFile.exists()) signingFile.withInputStream { signing.load(it) }
+
+android {
+    namespace 'com.minesweeper.android'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.minesweeper.ex'
+        minSdk 26
+        targetSdk 35
+        versionCode 6
+        versionName '1.1'
+        testInstrumentationRunner 'com.minesweeper.android.SmokeInstrumentation'
+    }
+    signingConfigs {
+        release {
+            if (signingFile.exists()) {
+                storeFile rootProject.file(signing.getProperty('storeFile'))
+                storePassword signing.getProperty('storePassword')
+                keyAlias signing.getProperty('keyAlias')
+                keyPassword signing.getProperty('keyPassword')
+            }
+        }
+    }
+    buildTypes {
+        debug { applicationIdSuffix '.debug'; versionNameSuffix '-debug' }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled true
+    }
+    sourceSets {
+        main.java {
+            srcDirs = ['src/main/java', '../../src/main/java/com/minesweeper/config',
+                       '../../src/main/java/com/minesweeper/model', '../../src/main/java/com/minesweeper/service']
+        }
+    }
+}
+
+dependencies {
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
+}
